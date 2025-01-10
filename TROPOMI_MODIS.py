@@ -208,7 +208,8 @@ from BLH_colocalize import blh, convert_utc_to_local
 import warnings
 from multiprocessing import Pool, cpu_count
 import dask.array as da
-
+from netCDF4 import Dataset
+import pandas as pd
 
 # Fonction pour récupérer les arguments en ligne de commande
 def parse_args():
@@ -275,7 +276,7 @@ def filter_files_2(file_list, dates_set, start, end):
     return filtered_files
 
 # Fonction pour effectuer le traitement sur les fichiers
-def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file):
+def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
     # Définir la date du fichier
     d = str(ai_file)[47:55]
     date_obj = datetime.strptime(d, '%Y%m%d')
@@ -287,32 +288,27 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file):
          xr.open_dataset(cloud_file) as cloud_ds, \
          xr.open_dataset(cf_file) as cf_ds, \
          xr.open_dataset(modis_file) as modis_ds:
-        print("coucou")
+       
         # Variables
         alh1 = alh_ds['aerosol_height'].isel(time=0).fillna(0).astype(np.float32).values * 1000
         cth1 = cloud_ds['cloud_top_height'].isel(time=0).fillna(0).astype(np.float32).values
         uvai = original_ds['absorbing_aerosol_index'].isel(time=0).fillna(0).astype(np.float32).values
-        CF = cf_ds['cloud_fraction'].isel(time=0).fillna(0).astype(np.float32).values
+        CF   = cf_ds['cloud_fraction'].isel(time=0).fillna(0).astype(np.float32).values
         COT  = modis_ds['Cloud_Optical_Thickness_37'].compute()
         CER  = modis_ds['Cloud_Effective_Radius_37'].compute()
         CTT  = modis_ds['cloud_top_temperature_1km'].compute()
-        print(f"Dimensions de alh1: {alh1.shape}, min: {np.min(alh1)}, max: {np.max(alh1)}")
-        print(f"Dimensions de cth1: {cth1.shape}, min: {np.min(cth1)}, max: {np.max(cth1)}")
-        print(f"Dimensions de uvai: {uvai.shape}, min: {np.min(uvai)}, max: {np.max(uvai)}")
-        print(f"Dimensions de CF: {CF.shape}, min: {np.min(CF)}, max: {np.max(CF)}")
-        print(f"Dimensions de COT: {COT.shape}, min: {np.min(COT)}, max: {np.max(COT)}")
-        print(f"Dimensions de CER: {CER.shape}, min: {np.min(CER)}, max: {np.max(CER)}")
-        print(f"Dimensions de CTT: {CTT.shape}, min: {np.min(CTT)}, max: {np.max(CTT)}")
-
+        Nd   = modis_ds['Nd_37'].compute()
+        LWP  = (5/9)*COT*(CER*1e-4)
+        
         blh_alh = alh1
         blh_alh[alh1==np.nan] = np.nan
         blh_alh[ds_blh==np.nan] = np.nan
-        print('coucou2')
+       
         print(blh_alh.shape, ds_blh.shape)
         
         blh_alh[blh_alh != np.nan] = alh1[blh_alh != np.nan] - ds_blh[blh_alh != np.nan]
         dist = blh_alh
-        print('coucou3')
+       
         blh_alh[(blh_alh != np.nan) & (alh1 > ds_blh)] = True
         blh_alh[(blh_alh != np.nan) & (blh_alh != True)] = False
         flag_alh = blh_alh
@@ -328,7 +324,7 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file):
 
         nan_uvai = np.isnan(uvai)
         
-        print('coucou4')
+        
         # Nettoyage des NaN et conversion explicite en booléens si nécessaire
         flag_cf = np.where(np.isnan(CF), False, CF > 0.01)  # Vérifie CF et remplace les NaN par False
         flag_abs = flag_abs.astype(bool)  # Assure que flag_abs est de type bool
@@ -356,7 +352,7 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file):
         flag_clr_abl_dif = flag_clr_abl & np.logical_not(flag_abs)
         flag_clr_bbl_dif = flag_clr_bbl & np.logical_not(flag_abs)
 
-        print('coucou6')
+       
         # Aerosol fraction
         af_flags = [flag_acc_abl_abs, flag_acc_bbl_abs, flag_clr_abl_abs, flag_clr_bbl_abs, 
                     flag_acc_abl_dif, flag_acc_bbl_dif, flag_clr_abl_dif, flag_clr_bbl_dif]
@@ -364,7 +360,7 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file):
                         'af_aac_abl_dif', 'af_aac_bbl_dif', 'af_clr_abl_dif', 'af_clr_bbl_dif']
 
         af_results = {var: da.where(flag, 1, 0) for var, flag in zip(af_variables, af_flags)}
-        af_results = {var: da.where(nan_uvai, np.nan, data) for var, data in af_results.items()}
+        af_results = {var: da.where(nan_uvai, np.nan, data).astype(np.float32) for var, data in af_results.items()}
 
         # AI
         ai_flags = [flag_acc_abl_abs, flag_acc_bbl_abs, flag_clr_abl_abs, flag_clr_bbl_abs,
@@ -372,15 +368,15 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file):
         ai_variables = ['ai_aac_abl_abs', 'ai_aac_bbl_abs', 'ai_clr_abl_abs', 'ai_clr_bbl_abs',
                         'ai_aac_abl_dif', 'ai_aac_bbl_dif', 'ai_clr_abl_dif', 'ai_clr_bbl_dif']
 
-        ai_results = {var: da.where(flag & (~nan_uvai), uvai, np.nan) for var, flag in zip(ai_variables, ai_flags)}
+        ai_results = {var: da.where(flag & (~nan_uvai), uvai, np.nan).astype(np.float32) for var, flag in zip(ai_variables, ai_flags)}
 
         # ALH - BLH = dist
         dist_flags = ai_flags  # Same flags as for AI
         dist_variables = ['dist_aac_abl_abs', 'dist_aac_bbl_abs', 'dist_clr_abl_abs', 'dist_clr_bbl_abs',
                           'dist_aac_abl_dif', 'dist_aac_bbl_dif', 'dist_clr_abl_dif', 'dist_clr_bbl_dif']
 
-        dist_results = {var: da.where(flag & (~nan_uvai), dist, np.nan) for var, flag in zip(dist_variables, dist_flags)}
-
+        dist_results = {var: da.where(flag & (~nan_uvai), dist, np.nan).astype(np.float32) for var, flag in zip(dist_variables, dist_flags)}
+           
         variables = {
             'blh': ds_blh,
             'alh': alh1,
@@ -390,39 +386,250 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file):
             'ctt': CTT,
             'cot': COT,
             'cer': CER,
+            'Nd' : Nd,
+            'LWP': LWP
         }
         variables.update(af_results)
         variables.update(ai_results)
         variables.update(dist_results)
+        
+         # Chargez et traitez le masque terre-mer
+       # LSM_coarsened = load_and_interpolate_lsm(lsm_file)
+        #LSM_shifted = np.flip(shift_longitude_and_data(LSM_coarsened), axis = 0)
+        #df_lsm = create_lsm_dataset(LSM_shifted)
+        
+        # Filtrez les données pour obtenir les zones
+        #df_lsm = filter_data(df_lsm)
+        
+        # Assuming df_lsm is your xarray Dataset and 'Zone' is the variable you want to assign
+        #zones = df_lsm['Zone'].values
+
+        # Create a new DataArray with the correct dimensions and coordinates
+        #zones_da = xr.DataArray(
+            #zones,
+            #coords={'latitude': df_lsm['latitude'], 'longitude': df_lsm['longitude']},
+            #dims=['latitude', 'longitude']
+        #)
+        print('coucou6')
+        # Add the zones to your variables dictionary
+        #variables['Zone'] = zones_da
+
+        name = list(variables.keys())
+        print(name)
+        longnames = {'blh': 'Boundary Layer Height',
+                     'alh': 'Areosol Layer Height',
+                     'cth': 'Cloud Top Height',
+                     'cf':  'Cloud Fraction',
+                     'ai':  'Aerosol Index',
+                     'ctt': 'Cloud Top Temperature',
+                     'cot': 'Cloud Optical Thickness at 3.7um',
+                     'cer': 'Cloud Effective Radius at 3.7um',
+                     'Nd' : 'Cloud top droplet number concentration at 3.7um',
+                     'LWP': 'Cloud Liquid Water Path at 3.7um',
+                     'af_aac_abl_abs': 'Aerosol Fraction for Absorbing Aerosols Above Clouds and Above Boundary Layer',
+                     'af_aac_bbl_abs': 'Aerosol Fraction for Absorbing Aerosols Above Clouds and Below Boundary Layer',
+                     'af_clr_abl_abs': 'Aerosol Fraction for Absorbing Aerosols in Clear Sky and Above Boundary Layer',
+                     'af_clr_bbl_abs': 'Aerosol Fraction for Absorbing Aerosols in Clear Sky and Below Boundary Layer',
+                     'af_aac_abl_dif': 'Aerosol Fraction for Diffusing Aerosols Above Clouds and Above Boundary Layer',
+                     'af_aac_bbl_dif': 'Aerosol Fraction for Diffusing Aerosols Above Clouds and Below Boundary Layer',
+                     'af_clr_abl_dif': 'Aerosol Fraction for Diffusing Aerosols in Clear Sky and Above Boundary Layer',
+                     'af_clr_bbl_dif': 'Aerosol Fraction for Diffusing Aerosols in Clear Sky and Below Boundary Layer',
+                     'ai_aac_abl_abs': 'Aerosol Index for Absorbing Aerosols Above Clouds and Above Boundary Layer',
+                     'ai_aac_bbl_abs': 'Aerosol Index for Absorbing Aerosols Above Clouds and Below Boundary Layer',
+                     'ai_clr_abl_abs': 'Aerosol Index for Absorbing Aerosols in Clear Sky and Above Boundary Layer',
+                     'ai_clr_bbl_abs': 'Aerosol Index for Absorbing Aerosols in Clear Sky and Below Boundary Layer',
+                     'ai_aac_abl_dif': 'Aerosol Index for Diffusing Aerosols Above Clouds and Above Boundary Layer',
+                     'ai_aac_bbl_dif': 'Aerosol Index for Diffusing Aerosols Above Clouds and Below Boundary Layer',
+                     'ai_clr_abl_dif': 'Aerosol Index for Diffusing Aerosols in Clear Sky and Above Boundary Layer',
+                     'ai_clr_bbl_dif': 'Aerosol Index for Diffusing Aerosols in Clear Sky and Below Boundary Layer',
+                     'dist_aac_abl_abs': 'Aerosol-BL distance for Absorbing Aerosols Above Clouds and Above Boundary Layer',
+                     'dist_aac_bbl_abs': 'Aerosol-BL distance for Absorbing Aerosols Above Clouds and Below Boundary Layer',
+                     'dist_clr_abl_abs': 'Aerosol-BL distance for Absorbing Aerosols in Clear Sky and Above Boundary Layer',
+                     'dist_clr_bbl_abs': 'Aerosol-BL distance for Absorbing Aerosols in Clear Sky and Below Boundary Layer',
+                     'dist_aac_abl_dif': 'Aerosol-BL distance for Diffusing Aerosols Above Clouds and Above Boundary Layer',
+                     'dist_aac_bbl_dif': 'Aerosol-BL distance for Diffusing Aerosols Above Clouds and Below Boundary Layer',
+                     'dist_clr_abl_dif': 'Aerosol-BL distance for Diffusing Aerosols in Clear Sky and Above Boundary Layer',
+                     'dist_clr_bbl_dif': 'Aerosol-BL distance for Diffusing Aerosols in Clear Sky and Below Boundary Layer'
+                     
+                     }
+        units = {'blh': 'm',
+                 'alh': 'm',
+                 'cth': 'm',
+                 'cf':  '1',
+                 'ai':  '1',
+                 'ctt': 'K',
+                 'cot': '1',
+                 'cer': 'um',
+                 'Nd': 'cm-3',
+                 'LWP': 'g.cm-2',
+                 'af_aac_abl_abs': '1',
+                 'af_aac_bbl_abs': '1',
+                 'af_clr_abl_abs': '1',
+                 'af_clr_bbl_abs': '1',
+                 'af_aac_abl_dif': '1',
+                 'af_aac_bbl_dif': '1',
+                 'af_clr_abl_dif': '1',
+                 'af_clr_bbl_dif': '1',
+                 'ai_aac_abl_abs': '1',
+                 'ai_aac_bbl_abs': '1',
+                 'ai_clr_abl_abs': '1',
+                 'ai_clr_bbl_abs': '1',
+                 'ai_aac_abl_dif': '1',
+                 'ai_aac_bbl_dif': '1',
+                 'ai_clr_abl_dif': '1',
+                 'ai_clr_bbl_dif': '1',
+                 'dist_aac_abl_abs': 'm',
+                 'dist_aac_bbl_abs': 'm',
+                 'dist_clr_abl_abs': 'm',
+                 'dist_clr_bbl_abs': 'm',
+                 'dist_aac_abl_dif': 'm',
+                 'dist_aac_bbl_dif': 'm',
+                 'dist_clr_abl_dif': 'm',
+                 'dist_clr_bbl_dif': 'm'
+                 
+                 }
         
         # Créer un nouveau dataset pour stocker les variables resamplées
         new_rows = 8192
         new_cols = 16384
 
         # Création d'un nouveau dataset NetCDF avec les dimensions cibles
-        with warnings.catch_warnings():
-            warnings.filterwarnings(action='ignore', message='Mean of empty slice')
-            resampled_ds = xr.Dataset(coords={
-                'latitude': da.linspace(-90, 90, new_rows),
-                'longitude': da.linspace(-180, 180, new_cols)
-            })
-            # Add data to the new dataset
+        # Define the target file path
+        output_path = f'/LARGE14/devigne/Données_TROPOMI_MODIS/2020/resampled_data_tropomodis_{date}.nc'
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        # Create the new NetCDF file
+        with Dataset(output_path, 'w', format='NETCDF4') as nc:
+            
+            # Define dimensions
+            nc.createDimension('latitude', new_rows)
+            nc.createDimension('longitude', new_cols)
+        
+            # Define coordinate variables
+            latitudes = nc.createVariable('latitude', np.float32, ('latitude',))
+            longitudes = nc.createVariable('longitude', np.float32, ('longitude',))
+        
+            # Assign values to coordinate variables
+            latitudes[:] = np.linspace(-90, 90, new_rows)
+            longitudes[:] = np.linspace(-180, 180, new_cols)
+        
+            # Assign attributes to coordinate variables
+            latitudes.units = "degrees_north"
+            latitudes.long_name = "Latitude"
+            longitudes.units = "degrees_east"
+            longitudes.long_name = "Longitude"
+        
+            # Add data variables
             for var_name, data in variables.items():
-                resampled_ds[var_name] = xr.DataArray(data, coords={'latitude':da.linspace(-90, 90, new_rows) , 'longitude':da.linspace(-180, 180, new_cols) }, dims=['latitude', 'longitude'])
-                resampled_ds[var_name] = resampled_ds[var_name].fillna(-9999)
-                resampled_ds[var_name].attrs["_FillValue"] = -9999
-        # Calculer et sauvegarder le résultat
-        resampled_ds = resampled_ds.compute()
-        compression = {"zlib": True, "complevel": 4}
-        for var_name in resampled_ds.data_vars:
-            resampled_ds[var_name].encoding.update(compression)
-        resampled_ds.to_netcdf(f'/LARGE14/devigne/Données_TROPOMI_MODIS/2019/resampled_data_tropomodis_{date}.nc')
+                
+                # Define variable
+                var = nc.createVariable(
+                    var_name, np.float32, ('latitude', 'longitude'), fill_value=-9999, zlib=True, complevel=5
+                )
+                
+                # Assign data
+                var[:, :] = np.nan_to_num(data, True, -9999).astype(np.float32)
+        
+                # Assign attributes
+                #var._FillValue = -9999
+                var.units = f"{units[var_name]}"  # Update with appropriate units if available
+                var.long_name = f"{longnames[var_name]}"  # Update with a descriptive name if available
+                var.title = 'Aerosols-Clouds properties calculated using different Aerosol-Cloud scenarios'
+                var.institution = 'Atmospherical Optics Laboratory, Lille, France'
+                var.source = 'MODIS Collection 6/6.1 06L2, 03L2 and daily products, TROPOMI L3 daily products, CAMS ERA5 reanalysis data'
+                var.contact = "Elise Devigne (elise.devigne@univ-lille.fr)"
+
+        print(f"NetCDF file successfully created at {output_path}")
+
+def load_and_interpolate_lsm(file, lat_size=8192, lon_size=16384):
+    try:
+        lsm = xr.open_dataset(file, engine='netcdf4')
+    except ValueError:
+        lsm = xr.open_dataset(file, engine='scipy')
+
+    lsm = lsm.to_array().squeeze()
+    if 'time' in lsm.dims:
+        lsm = lsm.mean(dim='time')
+
+    new_lat = np.linspace(-90, 90, lat_size)
+    new_lon = np.linspace(lsm['longitude'].min(), lsm['longitude'].max(), lon_size)
+
+    lsm_interpolated = lsm.interp(latitude=new_lat, longitude=new_lon, method='nearest')
+    return xr.Dataset({'LSM': lsm_interpolated}, coords={'latitude': new_lat, 'longitude': new_lon})
+
+def shift_longitude_and_data(dataset):
+    dataarray = dataset.to_dataarray()
+    lon = dataarray['longitude'].values
+    lat = dataarray['latitude'].values
+
+    # Shift longitudes from [0, 360) to [-180, 180)
+    if lon.max() > 180:
+        lon = np.where(lon > 180, lon - 360, lon)
+        lon = np.sort(lon)
+
+        # Shift data to match new longitude order
+        new_data = dataarray.values
+        print(new_data.shape)
+        reordered_data = np.roll(new_data[0], shift=int(len(lon)/2), axis=1)
+        print(reordered_data)
+        # Create a new DataArray with shifted coordinates
+        return xr.DataArray(reordered_data, coords=[lat, lon], dims=['latitude', 'longitude'])
+    else:
+        return dataarray
 
 
+
+def create_lsm_dataset(lsm_shifted):
+    return xr.Dataset({
+        'LSM': (['latitude', 'longitude'], lsm_shifted.values),
+    },
+    coords={
+        'latitude': lsm_shifted['latitude'].values,
+        'longitude': lsm_shifted['longitude'].values
+    })
+
+regions = {
+    'Peruvian': {'lat_min': -30, 'lat_max': 0, 'lon_min': -115, 'lon_max': -65, 'type': 'Ocean', 'id': 1},
+    'Namibian': {'lat_min': -30, 'lat_max': 0, 'lon_min': -20, 'lon_max': 20, 'type': 'Ocean', 'id': 2},
+    'Australian': {'lat_min': -35, 'lat_max': -15, 'lon_min': 55, 'lon_max': 120, 'type': 'Ocean', 'id': 3},
+    'Californian': {'lat_min': 10, 'lat_max': 40, 'lon_min': -150, 'lon_max': -110, 'type': 'Ocean', 'id': 4},
+    'Canarian': {'lat_min': 10, 'lat_max': 40, 'lon_min': -40, 'lon_max': -5, 'type': 'Ocean', 'id': 5},
+    'China': {'lat_min': 10, 'lat_max': 40, 'lon_min': 100, 'lon_max': 160, 'type': 'Ocean', 'id': 6},
+    'North Atlantic': {'lat_min': 40, 'lat_max': 70, 'lon_min': -60, 'lon_max': 0, 'type': 'Ocean', 'id': 7},
+    'Northeast Pacific': {'lat_min': 40, 'lat_max': 70, 'lon_min': -180, 'lon_max': -120, 'type': 'Ocean', 'id': 8},
+    'Northwest Pacific': {'lat_min': 40, 'lat_max': 70, 'lon_min': 120, 'lon_max': 180, 'type': 'Ocean', 'id': 9},
+    'Southeast Pacific': {'lat_min': -70, 'lat_max': -30, 'lon_min': -180, 'lon_max': -70, 'type': 'Ocean', 'id': 10},
+    'South Atlantic': {'lat_min': -70, 'lat_max': -30, 'lon_min': -70, 'lon_max': 60, 'type': 'Ocean', 'id': 11},
+    'South Indian Ocean': {'lat_min': -70, 'lat_max': -35, 'lon_min': 60, 'lon_max': 180, 'type': 'Ocean', 'id': 12},
+    'Galapagos': {'lat_min': 0, 'lat_max': 10, 'lon_min': -120, 'lon_max': -70, 'type': 'Ocean', 'id': 13},
+    'Chinese Stratus': {'lat_min': 10, 'lat_max': 40, 'lon_min': 100, 'lon_max': 130, 'type': 'Land', 'id': 14},
+    'Amazon': {'lat_min': -15, 'lat_max': 10, 'lon_min': -80, 'lon_max': -30, 'type': 'Land', 'id': 15},
+    'Equatorial Africa': {'lat_min': -15, 'lat_max': 15, 'lon_min': -20, 'lon_max': 20, 'type': 'Land', 'id': 16},
+    'North America': {'lat_min': 30, 'lat_max': 45, 'lon_min': -100, 'lon_max': -75, 'type': 'Land', 'id': 17},
+    'India': {'lat_min': 10, 'lat_max': 30, 'lon_min': 65, 'lon_max': 90, 'type': 'Land', 'id': 18},
+    'Europe': {'lat_min': 25, 'lat_max': 45, 'lon_min': 0, 'lon_max': 50, 'type': 'Land', 'id': 19},    
+}
+
+def filter_data(df):
+    df['Zone'] = np.nan
+    for region_name, region in regions.items():
+        mask = (
+            (df['latitude'] >= region['lat_min']) & (df['latitude'] <= region['lat_max']) &
+            (df['longitude'] >= region['lon_min']) & (df['longitude'] <= region['lon_max'])
+        )
+        df.loc[mask, 'Zone'] = region['id']
+        if region['type'] == 'Ocean':
+            df.loc[mask & (df['LSM'] >= 0.4), 'Zone'] = np.nan
+        elif region['type'] == 'Land':
+            df.loc[mask & (df['LSM'] < 0.4), 'Zone'] = np.nan
+    return df
+
+
+lsm_file = '/home/devigne/land_sea_mask'
 def process_files(ai_file, alh_file, cloud_file, cf_file, modis_file):
     try:
         # Votre fonction de traitement ici
-        get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file)
+        get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file)
     except Exception as e:
         print(f"Erreur lors du traitement des fichiers {ai_file}, {alh_file}, {cloud_file}, {cf_file}, {modis_file}: {e}")
 
@@ -452,13 +659,13 @@ if __name__=="__main__":
     dates3 = extract_dates(list_cloud, 61, 69)
     dates_cf = extract_dates(list_cf, 58, 66)
     date_modis = extract_dates_2(list_modis, 47, 57)
-    print(dates_cf, date_modis)
+    
     common_date = find_common_dates(dates1, dates2, dates3, dates_cf, date_modis)
-    comparison_date = datetime(2019, 11, 28)
-    end_date = datetime(2019, 11, 30)
+    comparison_date = datetime(2019, 1, 31)
+    end_date = datetime(2020, 1, 2)
     filtered_dates = {date for date in common_date if comparison_date < date < end_date}
 
-    print(len(filtered_dates))
+    
     # Filtrer les fichiers selon les dates filtrées
     ai_files = filter_files(list_ai, filtered_dates, 47, 55)
     alh_files = filter_files(list_lh, filtered_dates, 48, 56)

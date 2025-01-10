@@ -393,26 +393,29 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
         variables.update(ai_results)
         variables.update(dist_results)
         
-         # Chargez et traitez le masque terre-mer
-       # LSM_coarsened = load_and_interpolate_lsm(lsm_file)
-        #LSM_shifted = np.flip(shift_longitude_and_data(LSM_coarsened), axis = 0)
-        #df_lsm = create_lsm_dataset(LSM_shifted)
+        # Chargement et interpolation
+        print("Chargement et interpolation du LSM...")
+        lsm_interpolated = load_and_interpolate_lsm(lsm_file)
+        print("Interpolation terminée.")
         
-        # Filtrez les données pour obtenir les zones
-        #df_lsm = filter_data(df_lsm)
+        # Recalage des longitudes
+        print("Recalage des longitudes...")
+        lsm_shifted = shift_longitude_and_data(lsm_interpolated)
+        print("Recalage terminé.")
         
-        # Assuming df_lsm is your xarray Dataset and 'Zone' is the variable you want to assign
-        #zones = df_lsm['Zone'].values
+        # Création du dataset
+        print("Création du Dataset...")
+        df_lsm = create_lsm_dataset(lsm_shifted)
+        print("Dataset créé.")
+        
+        # Filtrage des données
+        print("Filtrage des données...")
+        df_lsm_filtered = filter_data(df_lsm)
+        print("Filtrage terminé.")
 
-        # Create a new DataArray with the correct dimensions and coordinates
-        #zones_da = xr.DataArray(
-            #zones,
-            #coords={'latitude': df_lsm['latitude'], 'longitude': df_lsm['longitude']},
-            #dims=['latitude', 'longitude']
-        #)
         print('coucou6')
         # Add the zones to your variables dictionary
-        #variables['Zone'] = zones_da
+        variables['Zone'] = df_lsm_filtered['Zone'].values
 
         name = list(variables.keys())
         print(name)
@@ -449,7 +452,8 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
                      'dist_aac_abl_dif': 'Aerosol-BL distance for Diffusing Aerosols Above Clouds and Above Boundary Layer',
                      'dist_aac_bbl_dif': 'Aerosol-BL distance for Diffusing Aerosols Above Clouds and Below Boundary Layer',
                      'dist_clr_abl_dif': 'Aerosol-BL distance for Diffusing Aerosols in Clear Sky and Above Boundary Layer',
-                     'dist_clr_bbl_dif': 'Aerosol-BL distance for Diffusing Aerosols in Clear Sky and Below Boundary Layer'
+                     'dist_clr_bbl_dif': 'Aerosol-BL distance for Diffusing Aerosols in Clear Sky and Below Boundary Layer',
+                     'Zone': 'Zone of a specific oceanic or land region'
                      
                      }
         units = {'blh': 'm',
@@ -485,8 +489,8 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
                  'dist_aac_abl_dif': 'm',
                  'dist_aac_bbl_dif': 'm',
                  'dist_clr_abl_dif': 'm',
-                 'dist_clr_bbl_dif': 'm'
-                 
+                 'dist_clr_bbl_dif': 'm',
+                 'Zone': 'index'    
                  }
         
         # Créer un nouveau dataset pour stocker les variables resamplées
@@ -524,7 +528,7 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
                 
                 # Define variable
                 var = nc.createVariable(
-                    var_name, np.float32, ('latitude', 'longitude'), fill_value=-9999, zlib=True, complevel=5
+                    var_name, np.float32, ('latitude', 'longitude'), fill_value=-9999, zlib=True, complevel=6
                 )
                 
                 # Assign data
@@ -542,44 +546,67 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
         print(f"NetCDF file successfully created at {output_path}")
 
 def load_and_interpolate_lsm(file, lat_size=8192, lon_size=16384):
+    """
+    Charge un fichier LSM et l'interpole sur une grille régulière.
+    """
     try:
         lsm = xr.open_dataset(file, engine='netcdf4')
     except ValueError:
         lsm = xr.open_dataset(file, engine='scipy')
 
+    # Convertir en tableau si nécessaire
     lsm = lsm.to_array().squeeze()
+
+    # Si "time" est une dimension, prendre la moyenne
     if 'time' in lsm.dims:
         lsm = lsm.mean(dim='time')
 
+    # Définir les nouvelles coordonnées de grille
     new_lat = np.linspace(-90, 90, lat_size)
-    new_lon = np.linspace(lsm['longitude'].min(), lsm['longitude'].max(), lon_size)
+    new_lon = np.linspace(-180, 180, lon_size)  # Conversion explicite sur [-180, 180]
 
-    lsm_interpolated = lsm.interp(latitude=new_lat, longitude=new_lon, method='nearest')
+    # Interpolation sur la nouvelle grille
+    try:
+        lsm_interpolated = lsm.interp(latitude=new_lat, longitude=new_lon, method='nearest')
+    except ValueError as e:
+        print(f"Erreur lors de l'interpolation : {e}")
+        raise
+
     return xr.Dataset({'LSM': lsm_interpolated}, coords={'latitude': new_lat, 'longitude': new_lon})
 
+
 def shift_longitude_and_data(dataset):
-    dataarray = dataset.to_dataarray()
+    """
+    Recalage des longitudes de [0, 360) à [-180, 180) et ajustement des données.
+    """
+    dataarray = dataset.to_array().squeeze()
     lon = dataarray['longitude'].values
     lat = dataarray['latitude'].values
 
-    # Shift longitudes from [0, 360) to [-180, 180)
+    # Vérification de la plage des longitudes
     if lon.max() > 180:
+        # Conversion des longitudes sur [-180, 180)
         lon = np.where(lon > 180, lon - 360, lon)
-        lon = np.sort(lon)
+        sorted_indices = np.argsort(lon)
+        lon = lon[sorted_indices]
 
-        # Shift data to match new longitude order
+        # Réordonner les données pour correspondre aux nouvelles longitudes
         new_data = dataarray.values
-        print(new_data.shape)
-        reordered_data = np.roll(new_data[0], shift=int(len(lon)/2), axis=1)
-        print(reordered_data)
-        # Create a new DataArray with shifted coordinates
+        reordered_data = new_data[:, sorted_indices]  # Ajustement explicite sur les dimensions
+
+        # Création d'un nouveau DataArray avec les coordonnées corrigées
         return xr.DataArray(reordered_data, coords=[lat, lon], dims=['latitude', 'longitude'])
     else:
+        print("Les longitudes sont déjà dans la plage [-180, 180).")
         return dataarray
 
 
 
+
 def create_lsm_dataset(lsm_shifted):
+    """
+    Crée un Dataset xarray à partir d'un LSM recalé.
+    """
     return xr.Dataset({
         'LSM': (['latitude', 'longitude'], lsm_shifted.values),
     },
@@ -611,18 +638,31 @@ regions = {
 }
 
 def filter_data(df):
-    df['Zone'] = np.nan
+    df['Zone'] = np.nan  # Initialise la variable Zone avec des NaN
+
     for region_name, region in regions.items():
+        # Créez un masque pour la région
         mask = (
             (df['latitude'] >= region['lat_min']) & (df['latitude'] <= region['lat_max']) &
             (df['longitude'] >= region['lon_min']) & (df['longitude'] <= region['lon_max'])
         )
-        df.loc[mask, 'Zone'] = region['id']
+        print(f"Traitement de la région : {region_name}")
+        print("Pixels dans la région avant filtrage :", mask.sum())
+
+        # Appliquez le masque pour assigner la zone
+        df['Zone'] = df['Zone'].where(~mask, region['id'])
+
+        # Conditions supplémentaires pour les types de région
         if region['type'] == 'Ocean':
-            df.loc[mask & (df['LSM'] >= 0.4), 'Zone'] = np.nan
+            ocean_mask = mask & (df['LSM'] >= 0.4)
+            df['Zone'] = df['Zone'].where(~ocean_mask, np.nan)
         elif region['type'] == 'Land':
-            df.loc[mask & (df['LSM'] < 0.4), 'Zone'] = np.nan
+            land_mask = mask & (df['LSM'] < 0.4)
+            df['Zone'] = df['Zone'].where(~land_mask, np.nan)
+
     return df
+
+
 
 
 lsm_file = '/home/devigne/land_sea_mask'

@@ -28,19 +28,19 @@ def get_files(directory, pattern):
 if __name__=="__main__":
     multiprocessing.set_start_method('spawn')
     # Configure the Dask LocalCluster
-    cluster = LocalCluster(n_workers=1, threads_per_worker=1, memory_limit='128GB')  # Adjust memory per worker
+    cluster = LocalCluster(n_workers=1, threads_per_worker=1, memory_limit='48GB')  # Adjust memory per worker
     client = Client(cluster)
         
-    """
+   
     def fire_events(data_set, region, param_1, param_2):
-        data_set['date'] = pd.to_datetime(data_set['date'])
+        #data_set['date'] = pd.to_datetime(data_set['date'])
         df_filtered = data_set[data_set['Zone'] == region]
         #df_filtered = df_filtered[df_filtered['date'].dt.month.isin([1, 2, 12])]
         threshold = df_filtered[param_1].quantile(0.75)
         df_filtered['event'] = ma.masked_where((df_filtered[param_1].values<threshold), df_filtered[param_2])
         df_filtered['climatology'] = ma.masked_where((df_filtered[param_1].values>=threshold), df_filtered[param_2])
         return df_filtered
-    """
+    """ """
     
     # Base directory for data
     tropomi_dir_base = '/LARGE14/devigne/Données_TROPOMI_MODIS'
@@ -150,9 +150,9 @@ if __name__=="__main__":
     q1_clr = np.nanquantile(df_clear['ai_clr_bbl_abs'], 0.10)
     q3_clr = np.nanquantile(df_clear['ai_clr_bbl_abs'], 0.90)
     
-    print(df_abc, df_clear)
+    #print(df_abc, df_clear)
     print(q1, q3, q1_2, q3_2, q1_clr, q3_clr)
-    print(df_abc['LWP'])
+    
     
     #CER Histograms
     
@@ -175,66 +175,122 @@ if __name__=="__main__":
     
     import numpy as np
     
+   
+    def filter_outliers(data, lower_quantile=0.02, upper_quantile=0.98):
+           q_low = np.nanquantile(data, lower_quantile)
+           q_high = np.nanquantile(data, upper_quantile)
+           return data[(data >= q_low) & (data <= q_high)]
     import seaborn as sns
-    
-    
     
     # Paramètres nuageux
     parameters = ['cot', 'cer', 'Nd', 'LWP']
     titles = [r'$COT_{3.7µm}$', r'$CER_{3.7µm} (µm)$', r'$Nd$ (cm$^{-3}$)', r'$LWP$ (g/m$^2$)']
-    positions = [1, 2.5, 3.5, 4.5, 6, 7, 8]
+    positions = ['No Aer', 'AAC_ABL', 'AAC_BBL', 'CLR_BBL', 'AAC_ABL', 'AAC_BBL', 'CLR_BBL']
+    
+    # Couleurs
+    palette = {'HP': 'red', 'LP': 'blue'}
     
     # Initialisation de la figure
     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
     axes = axes.flatten()
     
-    # Couleurs
-    colors = ['r', 'b']
-    colors_hp = dict(color=colors[0])
-    colors_lp = dict(color=colors[1])
-    
-    
     # Boucle pour chaque paramètre
     for i, (param, title) in enumerate(zip(parameters, titles)):
         ax = axes[i]
     
-        aus_cloudy_abs_data2['HP'] = ma.masked_where((aus_cloudy_abs_data2['ai_aac_abl_abs'].values<q3), aus_cloudy_abs_data2[param])
-        aus_cloudy_abs_data2['LP'] = ma.masked_where((aus_cloudy_abs_data2['ai_aac_abl_abs'].values>q1), aus_cloudy_abs_data2[param])
-        df_abc['HP'] = ma.masked_where((df_abc['ai_aac_bbl_abs'].values<q3_2), df_abc[param])
-        df_abc['LP'] = ma.masked_where((df_abc['ai_aac_bbl_abs'].values>q1_2), df_abc[param])
-        df_clear['HP'] = ma.masked_where((df_clear['ai_clr_bbl_abs'].values<q3_clr), df_clear[param])
-        df_clear['LP'] = ma.masked_where((df_clear['ai_clr_bbl_abs'].values>q1_clr), df_clear[param])
+        # Préparation des données pour Seaborn
+        aus_cloudy_abs_data2['HP'] = aus_cloudy_abs_data2[param].where(aus_cloudy_abs_data2['ai_aac_abl_abs'] >= q3)
+        aus_cloudy_abs_data2['LP'] = aus_cloudy_abs_data2[param].where(aus_cloudy_abs_data2['ai_aac_abl_abs'] <= q1)
+        df_abc['HP'] = df_abc[param].where(df_abc['ai_aac_bbl_abs'] >= q3_2)
+        df_abc['LP'] = df_abc[param].where(df_abc['ai_aac_bbl_abs'] <= q1_2)
+        df_clear['HP'] = df_clear[param].where(df_clear['ai_clr_bbl_abs'] >= q3_clr)
+        df_clear['LP'] = df_clear[param].where(df_clear['ai_clr_bbl_abs'] <= q1_clr)
     
+        data = [
+            modis_aus[param].dropna(),
+            aus_cloudy_abs_data2['LP'].dropna(),
+            df_abc['LP'].dropna(),
+            df_clear['LP'].dropna(),
+            aus_cloudy_abs_data2['HP'].dropna(),
+            df_abc['HP'].dropna(),
+            df_clear['HP'].dropna(),
+        ]
+        data = [filter_outliers(d) for d in data]
+        # Création d'un DataFrame combiné pour seaborn
+        combined_data = pd.DataFrame({
+            'Value': np.concatenate(data),
+            'Condition': np.repeat(positions, [len(d) for d in data]),
+            'Type': ['No Aer'] * len(data[0]) + 
+                    ['LP'] * (len(data[1]) + len(data[2]) + len(data[3])) +
+                    ['HP'] * (len(data[4]) + len(data[5]) + len(data[6])) 
+                    
+        })
+        # Définir l'ordre explicite pour les catégories et les types
+        condition_order = ['No Aer', 'AAC_ABL', 'AAC_BBL', 'CLR_BBL']
+        type_order = ['LP', 'HP']
         
-        count_aac_bbl_hp, count_aac_abl_hp, count_clear_bbl_hp = df_abc['HP'].count(), aus_cloudy_abs_data2['HP'].count(), df_clear['HP'].count()
-        count_aac_bbl_lp, count_aac_abl_lp, count_clear_bbl_lp = df_abc['LP'].count(), aus_cloudy_abs_data2['LP'].count(), df_clear['LP'].count()
+        # Ajouter le "No Aer" sans split
+        sns.violinplot(
+            data=combined_data[combined_data['Type'] == 'No Aer'],
+            x='Condition',
+            y='Value',
+            ax=ax,
+            color='black',
+            alpha = 0.4,
+            inner='quartile',
+            cut = 0,
+            density_norm='width',
+            order=condition_order
+        )
+        # Traiter séparément la condition "No Aer"
+        sns.violinplot(
+            data=combined_data[combined_data['Type'] != 'No Aer'],
+            x='Condition',
+            y='Value',
+            hue='Type',
+            split=True,
+            ax=ax,
+            palette=palette,
+            alpha = 0.4,
+            inner='quartile',
+            cut = 0,
+            density_norm='width',
+            order=condition_order,  # Ordre explicite
+            hue_order=type_order,  # Ordre des types
+        )
     
-        red_line = mlines.Line2D([], [], color='red', linestyle='-', label='HP - AAC (AI>%.2f ; N=%.0f); AAC_BBL (AI>%.2f ; N=%.0f); CLR_BBL (AI>%.2f ; N=%.0f)'%(q3, count_aac_abl_hp, q3_2, count_aac_bbl_hp, q3_clr, count_clear_bbl_hp) )
-        green_line = mlines.Line2D([], [], color='blue', linestyle='-', label='LP - AAC (AI<%.2f ; N=%.0f); AAC_BBL (AI<%.2f ; N=%.0f); CLR_BBL (AI<%.2f ; N=%.0f)'%(q1, count_aac_abl_lp, q1_2, count_aac_bbl_lp, q1_clr, count_clear_bbl_lp) )
-    
-        # Ajout des distributions
-        sns.violinplot(data=[modis_aus[param]], positions=[1], color='k', ax=ax, width=0.4)
-        sns.violinplot(data=[aus_cloudy_abs_data2['HP']], positions=[6], color=colors[0], ax=ax, width=0.4)
-        sns.violinplot(data=[aus_cloudy_abs_data2['LP']], positions=[2.5], color=colors[1], ax=ax, width=0.4)
-        sns.violinplot(data=[df_abc['HP']], positions=[7], color=colors[0], ax=ax, width=0.4)
-        sns.violinplot(data=[df_abc['LP']], positions=[3.5], color=colors[1], ax=ax, width=0.4)
-        sns.violinplot(data=[df_clear['HP']], positions=[8], color=colors[0], ax=ax, width=0.4)
-        sns.violinplot(data=[df_clear['LP']], positions=[4.5], color=colors[1], ax=ax, width=0.4)
-    
-        # Lignes médianes et moyennes globales
-        ax.axhline(np.nanmedian(modis_aus[param]), color='k', linestyle='--', label='Médiane globale')
-        ax.axhline(np.nanmean(modis_aus[param]), color='g', linestyle='--', label='Moyenne globale')
-    
-        # Réglages de l'axe
+        # Ajouter les moyennes et médianes
+        for condition in condition_order:
+            for t in ['HP', 'LP']:
+                subset = combined_data[(combined_data['Condition'] == condition) & (combined_data['Type'] == t)]
+                if len(subset) > 0:
+                    mean = subset['Value'].mean()
+                    median = subset['Value'].median()
+                    # Position x
+                    x_pos = condition_order.index(condition) + 0.25 if t == 'HP' else condition_order.index(condition) - 0.25
+                    # Ajouter des marqueurs
+                    ax.scatter(x_pos, mean, color='green', s=50, marker='D', label='Mean' if i == 0 else "")
+                    ax.scatter(x_pos, median, color='black', s=50, marker='o', label='Median' if i == 0 else "")
+
+        
+        # Ajout des lignes médianes et moyennes globales
+        median = np.nanmedian(modis_aus[param])
+        mean = np.nanmean(modis_aus[param])
+        ax.axhline(median, color='k', linestyle='--', label='Median')
+        ax.axhline(mean, color='g', linestyle='--', label='Mean')
+        
+        # Ajustements de l'axe
         ax.set_ylabel(title, fontsize=13)
-        ax.set_xticks(positions)
-        ax.set_xticklabels(['No Aer', 'AAC_ABL', 'AAC_BBL', 'CLR_BBL', 'AAC_ABL', 'AAC_BBL', 'CLR_BBL'], fontsize=8)
+        ax.set_xlabel("")
+        ax.legend([], [], frameon=False)  # Supprimer la légende interne des violins
+        ax.set_title(title, fontsize=14)
+        
+    count_aac_bbl_hp, count_aac_abl_hp, count_clear_bbl_hp = df_abc['HP'].count(), aus_cloudy_abs_data2['HP'].count(), df_clear['HP'].count()
+    count_aac_bbl_lp, count_aac_abl_lp, count_clear_bbl_lp = df_abc['LP'].count(), aus_cloudy_abs_data2['LP'].count(), df_clear['LP'].count()
     
-        # Légende spécifique pour HP/LP
-        ax.legend(handles=[
-            mlines.Line2D([], [], color='r', label='HP'),
-            mlines.Line2D([], [], color='b', label='LP'),
-        ], loc='upper right')
+    red_line = mlines.Line2D([], [], color='red', linestyle='-', label='HP - AAC (AI>%.2f ; N=%.0f); AAC_BBL (AI>%.2f ; N=%.0f); CLR_BBL (AI>%.2f ; N=%.0f)'%(q3, count_aac_abl_hp, q3_2, count_aac_bbl_hp, q3_clr, count_clear_bbl_hp) )
+    green_line = mlines.Line2D([], [], color='blue', linestyle='-', label='LP - AAC (AI<%.2f ; N=%.0f); AAC_BBL (AI<%.2f ; N=%.0f); CLR_BBL (AI<%.2f ; N=%.0f)'%(q1, count_aac_abl_lp, q1_2, count_aac_bbl_lp, q1_clr, count_clear_bbl_lp) )
+    
     
     fig.subplots_adjust(bottom=0.7)  # Adjust the top to make space for the legend
     
@@ -242,40 +298,35 @@ if __name__=="__main__":
     fig.legend(handles=[red_line, green_line],
                fontsize=12, loc='lower center', ncol=1, bbox_to_anchor=(0.5, -0.05), fancybox=True)
     
-    fig.suptitle('Southeastern Pacific (Jan 2020)', fontsize=16)
+    fig.suptitle('Southeast Pacific (Jan 2020)', fontsize=16)
     
     plt.tight_layout(rect=[0, 0.05, 1, 1])  # Adjust layout to make space for the title
     
     plt.show()
-    fig.savefig('/home/devigne/Wildfires_Cases/SEPAC_DJF_Violinplot.pdf', bbox_inches='tight')
+    fig.savefig('/home/devigne/Wildfires_Cases/SEPAC_Jan_violinplot2.pdf', bbox_inches='tight')
     plt.close()
-    # Ajustement global
-    plt.tight_layout()
-    plt.show()
-
-
+   
+ 
 
 #%%
-"""
+
     from scipy.stats import norm
     import numpy.ma as ma
     # Assuming `fire_events` and `final_df` are defined and available
     # Assuming `regions` and `param` are also defined
     regions = ['Peruvian', 'Namibian', 'Australian', 'Californian', 'Canarian', 'China', 'North Atlantic', 'Northeast Pacific', 'Northwest Pacific', 'Southeast Pacific', 'South Atlantic', 'South Indian Ocean', 'Galapagos', 'Chinese Stratus', 'Amazon', 'Equatorial Africa', 'North America', 'India', 'Europe']
-    index = range(10, 13)
+    index = range(10, 11)
     
     
     
     param_2 = 'cer'
     param_1 = 'ai_aac_abl_abs'
     for zone in index:
-        data_set = fire_events(final_df_aerosol, zone, f'{param_1}', f'{param_2}')
+        data_set = fire_events(aus_cloudy_abs_data2, zone, f'{param_1}', f'{param_2}')
         
         # Ensure only finite values are used
-        event_data = data_set['event'].compressed()
-        climatology_data = data_set['climatology'].compressed()
-        print(event_data.type)
-        exit()
+        event_data = data_set['event']
+        climatology_data = data_set['climatology']
         # Fit normal distribution to the finite data
         mu, std = norm.fit(event_data)
         mu2, std2 = norm.fit(climatology_data)
@@ -302,7 +353,7 @@ if __name__=="__main__":
     
         plt.show()
 
-"""
+""""""
 
 
 #%%
@@ -360,16 +411,16 @@ colors_versicolor = dict(color=colors[1])
 #df_data1.boxplot(['Non AA TROPOMI'], positions=[1], boxprops=dict(color = 'k'), medianprops=dict(color = 'k'), whiskerprops=dict(color = 'k'), capprops=dict(color = 'k'), showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
 
 ###COT###
-modis_aus.violinplot([param], positions=[1], boxprops=dict(color = 'k'), medianprops=dict(color = 'k'), whiskerprops=dict(color = 'k'), capprops=dict(color = 'k'), showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
-aus_cloudy_abs_data2.violinplot(['HP'], positions=[6], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
-aus_cloudy_abs_data2.violinplot(['LP'], positions=[2.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
-df_abc.violinplot(['HP'], positions=[7], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
-df_abc.violinplot(['LP'], positions=[3.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
-df_clear.violinplot(['HP'], positions=[8], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
-df_clear.violinplot(['LP'], positions=[4.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
+modis_aus.boxplot([param], positions=[1], boxprops=dict(color = 'k'), medianprops=dict(color = 'k'), whiskerprops=dict(color = 'k'), capprops=dict(color = 'k'), showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
+aus_cloudy_abs_data2.boxplot(['HP'], positions=[6], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
+aus_cloudy_abs_data2.boxplot(['LP'], positions=[2.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
+df_abc.boxplot(['HP'], positions=[7], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
+df_abc.boxplot(['LP'], positions=[3.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
+df_clear.boxplot(['HP'], positions=[8], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
+df_clear.boxplot(['LP'], positions=[4.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
 
-#df_data1.violinplot(['MP'], positions=[5.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
-#df_data1.violinplot(['LP'], positions=[6], boxprops=colors_virginica, medianprops=colors_virginica, whiskerprops=colors_virginica, capprops=colors_virginica, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
+#df_data1.boxplot(['MP'], positions=[5.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
+#df_data1.boxplot(['LP'], positions=[6], boxprops=colors_virginica, medianprops=colors_virginica, whiskerprops=colors_virginica, capprops=colors_virginica, showfliers = False, showmeans = True, ax = axes1, widths = 0.4)
 
 
 axes1.set_ylabel(r'$COT_{3.7µm} $', fontsize = 13)
@@ -400,13 +451,13 @@ colors_versicolor = dict(color=colors[1])
 #df_data2.boxplot(['Non AA TROPOMI'], positions=[1], boxprops=dict(color = 'k'), medianprops=dict(color = 'k'), whiskerprops=dict(color = 'k'), capprops=dict(color = 'k'), showfliers = False, showmeans = True, ax = axes, widths = 0.4)
 
 ###CER###
-modis_aus.violinplot([param2], positions=[1], boxprops=dict(color = 'k'), medianprops=dict(color = 'k'), whiskerprops=dict(color = 'k'), capprops=dict(color = 'k'), showfliers = False, showmeans = True, ax = axes, widths = 0.4)
-aus_cloudy_abs_data2.violinplot(['HP1'], positions=[6], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes, widths = 0.4)
-aus_cloudy_abs_data2.violinplot(['LP1'], positions=[2.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes, widths = 0.4)
-df_abc.violinplot(['HP1'], positions=[7], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes, widths = 0.4)
-df_abc.violinplot(['LP1'], positions=[3.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes, widths = 0.4)
-df_clear.violinplot(['HP1'], positions=[8], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes, widths = 0.4)
-df_clear.violinplot(['LP1'], positions=[4.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes, widths = 0.4)
+modis_aus.boxplot([param2], positions=[1], boxprops=dict(color = 'k'), medianprops=dict(color = 'k'), whiskerprops=dict(color = 'k'), capprops=dict(color = 'k'), showfliers = False, showmeans = True, ax = axes, widths = 0.4)
+aus_cloudy_abs_data2.boxplot(['HP1'], positions=[6], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes, widths = 0.4)
+aus_cloudy_abs_data2.boxplot(['LP1'], positions=[2.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes, widths = 0.4)
+df_abc.boxplot(['HP1'], positions=[7], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes, widths = 0.4)
+df_abc.boxplot(['LP1'], positions=[3.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes, widths = 0.4)
+df_clear.boxplot(['HP1'], positions=[8], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes, widths = 0.4)
+df_clear.boxplot(['LP1'], positions=[4.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes, widths = 0.4)
 
 
 axes.set_ylabel(r'$CER_{3.7µm} (µm) $', fontsize = 13)
@@ -418,13 +469,13 @@ axes.set_xticks([1, 2.5, 3.5, 4.5, 6, 7, 8])
 axes.set_xticklabels(['No Aer', 'AAC_ABL', 'AAC_BBL', 'CLR_BBL', 'AAC_ABL', 'AAC_BBL', 'CLR_BBL'], fontsize = 8)
 
 ####ND####
-modis_aus.violinplot([param3], positions=[1], boxprops=dict(color = 'k'), medianprops=dict(color = 'k'), whiskerprops=dict(color = 'k'), capprops=dict(color = 'k'), showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
-aus_cloudy_abs_data2.violinplot(['HP2'], positions=[6], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
-aus_cloudy_abs_data2.violinplot(['LP2'], positions=[2.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
-df_abc.violinplot(['HP2'], positions=[7], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
-df_abc.violinplot(['LP2'], positions=[3.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
-df_clear.violinplot(['HP2'], positions=[8], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
-df_clear.violinplot(['LP2'], positions=[4.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
+modis_aus.boxplot([param3], positions=[1], boxprops=dict(color = 'k'), medianprops=dict(color = 'k'), whiskerprops=dict(color = 'k'), capprops=dict(color = 'k'), showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
+aus_cloudy_abs_data2.boxplot(['HP2'], positions=[6], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
+aus_cloudy_abs_data2.boxplot(['LP2'], positions=[2.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
+df_abc.boxplot(['HP2'], positions=[7], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
+df_abc.boxplot(['LP2'], positions=[3.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
+df_clear.boxplot(['HP2'], positions=[8], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
+df_clear.boxplot(['LP2'], positions=[4.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes2, widths = 0.4)
 
 
 axes2.set_ylabel(r'$Nd_{3.7µm} (cm^{-3})$', fontsize = 13)
@@ -436,13 +487,13 @@ axes2.set_xticks([1, 2.5, 3.5, 4.5, 6, 7, 8])
 axes2.set_xticklabels(['No Aer', 'AAC_ABL', 'AAC_BBL', 'CLR_BBL', 'AAC_ABL', 'AAC_BBL', 'CLR_BBL'], fontsize = 8)
 
 ####LWP####
-modis_aus.violinplot([param4], positions=[1], boxprops=dict(color = 'k'), medianprops=dict(color = 'k'), whiskerprops=dict(color = 'k'), capprops=dict(color = 'k'), showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
-aus_cloudy_abs_data2.violinplot(['HP3'], positions=[6], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
-aus_cloudy_abs_data2.violinplot(['LP3'], positions=[2.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
-df_abc.violinplot(['HP3'], positions=[7], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
-df_abc.violinplot(['LP3'], positions=[3.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
-df_clear.violinplot(['HP3'], positions=[8], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
-df_clear.violinplot(['LP3'], positions=[4.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
+modis_aus.boxplot([param4], positions=[1], boxprops=dict(color = 'k'), medianprops=dict(color = 'k'), whiskerprops=dict(color = 'k'), capprops=dict(color = 'k'), showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
+aus_cloudy_abs_data2.boxplot(['HP3'], positions=[6], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
+aus_cloudy_abs_data2.boxplot(['LP3'], positions=[2.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
+df_abc.boxplot(['HP3'], positions=[7], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
+df_abc.boxplot(['LP3'], positions=[3.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
+df_clear.boxplot(['HP3'], positions=[8], boxprops=colors_setosa, medianprops=colors_setosa, whiskerprops=colors_setosa, capprops=colors_setosa, showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
+df_clear.boxplot(['LP3'], positions=[4.5], boxprops=colors_versicolor, medianprops=colors_versicolor, whiskerprops=colors_versicolor, capprops=colors_versicolor, showfliers = False, showmeans = True, ax = axes3, widths = 0.4)
 
 
 axes3.set_ylabel(r'$LWP_{3.7µm} (g.cm^{-2})$', fontsize = 13)
@@ -465,7 +516,7 @@ fig.suptitle('SEA (JAS) 2019', fontsize=16)
 plt.tight_layout(rect=[0, 0.05, 1, 1])  # Adjust layout to make space for the title
 
 plt.show()
-fig.savefig('/home/devigne/Wildfires_Cases/SEPAC_DJF_Violinplot.pdf', bbox_inches='tight')
+fig.savefig('/home/devigne/Wildfires_Cases/SEPAC_DJF_boxplot.pdf', bbox_inches='tight')
 plt.close()
 """
 

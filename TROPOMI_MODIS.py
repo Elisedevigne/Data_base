@@ -209,7 +209,8 @@ import warnings
 from multiprocessing import Pool, cpu_count
 import dask.array as da
 from netCDF4 import Dataset
-import pandas as pd
+#import pandas as pd
+import gc
 
 # Fonction pour récupérer les arguments en ligne de commande
 def parse_args():
@@ -219,6 +220,7 @@ def parse_args():
     parser.add_argument('--cloud-dir', type=str, required=True, help="Répertoire des fichiers Cloud")
     parser.add_argument('--cf-dir', type=str, required=True, help="Répertoire des fichiers Cloud Fraction")
     parser.add_argument('--modis-dir', type=str, required=True, help="Répertoire des fichiers MODIS")
+    parser.add_argument('--eac4-dir', type=str, required=True, help="Répertoire des fichiers EAC4")
     return parser.parse_args()
 
 
@@ -243,6 +245,14 @@ def extract_dates_2(file_list, start, end):
         file_name = file_path[start:end]
         date_obj = datetime.strptime(file_name, '%Y_%m_%d')
         
+        dates.append(date_obj)
+    return dates
+
+def extract_dates_3(file_list, start, end):
+    dates = []
+    for file_path in file_list:
+        file_name = file_path[start:end]
+        date_obj = datetime.strptime(file_name, '%Y-%m-%d')
         dates.append(date_obj)
     return dates
 
@@ -275,23 +285,39 @@ def filter_files_2(file_list, dates_set, start, end):
             filtered_files.append(file_path)
     return filtered_files
 
+# Filtrer les fichiers selon les dates communes
+def filter_files_3(file_list, dates_set, start, end):
+    filtered_files = []
+    for file_path in file_list:
+        file_name = file_path[start:end]
+        date_obj = datetime.strptime(file_name, '%Y-%m-%d')
+        
+        if date_obj in dates_set:
+            filtered_files.append(file_path)
+    return filtered_files
+
 # Fonction pour effectuer le traitement sur les fichiers
-def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
+def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, eac4_file, lsm_file):
     # Définir la date du fichier
     d = str(ai_file)[47:55]
     date_obj = datetime.strptime(d, '%Y%m%d')
     date = date_obj.strftime('%Y-%m-%d')
     ds_blh = blh('blh', date)
+    #print(ai_file, alh_file, cloud_file, cf_file, modis_file, eac4_file)
     chunk = 10
     with xr.open_dataset(ai_file) as original_ds, \
          xr.open_dataset(alh_file) as alh_ds, \
          xr.open_dataset(cloud_file) as cloud_ds, \
          xr.open_dataset(cf_file) as cf_ds, \
-         xr.open_dataset(modis_file) as modis_ds:
+         xr.open_dataset(modis_file) as modis_ds, \
+         xr.open_dataset(eac4_file) as eac4_ds:
        
         # Variables
         alh1 = alh_ds['aerosol_height'].isel(time=0).fillna(0).astype(np.float32).values * 1000
-        cth1 = cloud_ds['cloud_top_height'].isel(time=0).fillna(0).astype(np.float32).values
+        
+        cth1 = cloud_ds['cloud_top_height'].isel(time=0).fillna(0).astype(np.float32).values * 1000
+        #print(alh1, cth1, np.nanmax(alh1), np.nanmax(cth1))
+        
         uvai = original_ds['absorbing_aerosol_index'].isel(time=0).fillna(0).astype(np.float32).values
         CF   = cf_ds['cloud_fraction'].isel(time=0).fillna(0).astype(np.float32).values
         COT  = modis_ds['Cloud_Optical_Thickness_37'].compute()
@@ -299,37 +325,46 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
         CTT  = modis_ds['cloud_top_temperature_1km'].compute()
         Nd   = modis_ds['Nd_37'].compute()
         LWP  = (5/9)*COT*(CER*1e-4)
+        N_dus = eac4_ds['N_dus'].astype(np.float32).compute()
+        N_dum = eac4_ds['N_dum'].astype(np.float32).compute()
+        N_dul = eac4_ds['N_dul'].astype(np.float32).compute()
+        N_bchphil = eac4_ds['N_bchphil'].astype(np.float32).compute()
+        N_bchphob = eac4_ds['N_bchphob'].astype(np.float32).compute()
         
-        blh_alh = alh1
-        blh_alh[alh1==np.nan] = np.nan
-        blh_alh[ds_blh==np.nan] = np.nan
-       
-        print(blh_alh.shape, ds_blh.shape)
+        # Initialize blh_alh with alh1 and handle NaNs
+        blh_alh = alh1.copy()
+        blh_alh[np.isnan(alh1)] = np.nan
+        blh_alh[np.isnan(ds_blh)] = np.nan
         
-        blh_alh[blh_alh != np.nan] = alh1[blh_alh != np.nan] - ds_blh[blh_alh != np.nan]
-        dist = blh_alh
-       
-        blh_alh[(blh_alh != np.nan) & (alh1 > ds_blh)] = True
-        blh_alh[(blh_alh != np.nan) & (blh_alh != True)] = False
-        flag_alh = blh_alh
-       
-        blh_cth = cth1
-        blh_cth[cth1==None] = None
-        blh_cth[(blh_cth != None) & (cth1 > ds_blh)] = True
-        blh_cth[(blh_cth != None) & (blh_cth != True)] = False
-        flag_cth = blh_cth
+        # Calculate distance
+        blh_alh[~np.isnan(blh_alh)] = alh1[~np.isnan(blh_alh)] - ds_blh[~np.isnan(blh_alh)]
+        dist = blh_alh.copy()
         
+        # Create flag_alh based on conditions
+        flag_alh = np.full_like(blh_alh, False, dtype=bool)
+        flag_alh[(~np.isnan(blh_alh)) & (alh1 > ds_blh)] = True
+        
+        # Initialize blh_cth with cth1 and handle None values
+        blh_cth = cth1.copy()
+        blh_cth[cth1 == None] = None
+        
+        # Create flag_cth based on conditions
+        flag_cth = np.full_like(blh_cth, False, dtype=bool)
+        flag_cth[(blh_cth != None) & (cth1 > ds_blh)] = True
+        
+        # Create other flags
         flag_cf = CF > 0.01
         flag_abs = uvai > 0
-
+        
+        # Print results
         nan_uvai = np.isnan(uvai)
         
         
         # Nettoyage des NaN et conversion explicite en booléens si nécessaire
-        flag_cf = np.where(np.isnan(CF), False, CF > 0.01)  # Vérifie CF et remplace les NaN par False
-        flag_abs = flag_abs.astype(bool)  # Assure que flag_abs est de type bool
-        flag_cth = flag_cth.astype(bool)  # Assure que flag_cth est de type bool
-        flag_alh = flag_alh.astype(bool)  # Assure que flag_alh est de type bool
+        flag_cf = np.where(np.isnan(CF), False, CF > 0.01) 
+        flag_abs = flag_abs.astype(bool)  
+        flag_cth = flag_cth.astype(bool) 
+        flag_alh = flag_alh.astype(bool)  
         
         # Calcul des drapeaux pour les différentes catégories
         flag_acc_abl = flag_cf & np.logical_not(flag_cth) & flag_alh
@@ -376,7 +411,7 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
                           'dist_aac_abl_dif', 'dist_aac_bbl_dif', 'dist_clr_abl_dif', 'dist_clr_bbl_dif']
 
         dist_results = {var: da.where(flag & (~nan_uvai), dist, np.nan).astype(np.float32) for var, flag in zip(dist_variables, dist_flags)}
-           
+        
         variables = {
             'blh': ds_blh,
             'alh': alh1,
@@ -387,7 +422,12 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
             'cot': COT,
             'cer': CER,
             'Nd' : Nd,
-            'LWP': LWP
+            'LWP': LWP,
+            'N_dus': N_dus,
+            'N_dum': N_dum,
+            'N_dul': N_dul,
+            'N_bchphil': N_bchphil,
+            'N_bchphob': N_bchphob
         }
         variables.update(af_results)
         variables.update(ai_results)
@@ -429,6 +469,11 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
                      'cer': 'Cloud Effective Radius at 3.7um',
                      'Nd' : 'Cloud top droplet number concentration at 3.7um',
                      'LWP': 'Cloud Liquid Water Path at 3.7um',
+                     'N_dus': 'Small Dust Number Concentration (0.03-0.55um)',
+                     'N_dum': 'Medium Dust Number Concentration (0.55-0.9um)',
+                     'N_dul': 'Large Dust Number Concentration (0.9-20um)',
+                     'N_bchphil': 'Hydrophilic Black Carbon Number Concentration',
+                     'N_bchphob': 'Hydrophobic Black Carbon Number Concentration',
                      'af_aac_abl_abs': 'Aerosol Fraction for Absorbing Aerosols Above Clouds and Above Boundary Layer',
                      'af_aac_bbl_abs': 'Aerosol Fraction for Absorbing Aerosols Above Clouds and Below Boundary Layer',
                      'af_clr_abl_abs': 'Aerosol Fraction for Absorbing Aerosols in Clear Sky and Above Boundary Layer',
@@ -466,6 +511,11 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
                  'cer': 'um',
                  'Nd': 'cm-3',
                  'LWP': 'g.cm-2',
+                 'N_dus': 'm-2',
+                 'N_dum': 'm-2',
+                 'N_dul': 'm-2',
+                 'N_bchphil': 'm-2',
+                 'N_bchphob': 'm-2',
                  'af_aac_abl_abs': '1',
                  'af_aac_bbl_abs': '1',
                  'af_clr_abl_abs': '1',
@@ -528,7 +578,7 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
                 
                 # Define variable
                 var = nc.createVariable(
-                    var_name, np.float32, ('latitude', 'longitude'), fill_value=-9999, zlib=True, complevel=6
+                    var_name, np.float32, ('latitude', 'longitude'), fill_value=-9999, zlib=True, complevel=8
                 )
                 
                 # Assign data
@@ -540,9 +590,9 @@ def get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file):
                 var.long_name = f"{longnames[var_name]}"  # Update with a descriptive name if available
                 var.title = 'Aerosols-Clouds properties calculated using different Aerosol-Cloud scenarios'
                 var.institution = 'Atmospherical Optics Laboratory, Lille, France'
-                var.source = 'MODIS Collection 6/6.1 06L2, 03L2 and daily products, TROPOMI L3 daily products, CAMS ERA5 reanalysis data'
+                var.source = 'MODIS Collection 6/6.1 06L2, 03L2 and daily products, TROPOMI L3 daily products, CAMS ERA5 and EAC4 reanalysis data'
                 var.contact = "Elise Devigne (elise.devigne@univ-lille.fr)"
-
+                gc.enable()
         print(f"NetCDF file successfully created at {output_path}")
 
 def load_and_interpolate_lsm(file, lat_size=8192, lon_size=16384):
@@ -577,7 +627,7 @@ def load_and_interpolate_lsm(file, lat_size=8192, lon_size=16384):
 
 def shift_longitude_and_data(dataset):
     """
-    Recalage des longitudes de [0, 360) à [-180, 180) et ajustement des données.
+    Recalage des longitudes de [0, 360) à [-180, 180] et ajustement des données.
     """
     dataarray = dataset.to_array().squeeze()
     lon = dataarray['longitude'].values
@@ -597,7 +647,7 @@ def shift_longitude_and_data(dataset):
         # Création d'un nouveau DataArray avec les coordonnées corrigées
         return xr.DataArray(reordered_data, coords=[lat, lon], dims=['latitude', 'longitude'])
     else:
-        print("Les longitudes sont déjà dans la plage [-180, 180).")
+        print("Les longitudes sont déjà dans la plage [-180, 180].")
         return dataarray
 
 
@@ -666,10 +716,10 @@ def filter_data(df):
 
 
 lsm_file = '/home/devigne/land_sea_mask'
-def process_files(ai_file, alh_file, cloud_file, cf_file, modis_file):
+def process_files(ai_file, alh_file, cloud_file, cf_file, modis_file, eac4_file):
     try:
         # Votre fonction de traitement ici
-        get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, lsm_file)
+        get_nc(ai_file, alh_file, cloud_file, cf_file, modis_file, eac4_file, lsm_file)
     except Exception as e:
         print(f"Erreur lors du traitement des fichiers {ai_file}, {alh_file}, {cloud_file}, {cf_file}, {modis_file}: {e}")
 
@@ -686,12 +736,16 @@ if __name__=="__main__":
     path_3 = args.cloud_dir
     path_4 = args.cf_dir
     path_modis = args.modis_dir
+    path_eac4 = args.eac4_dir
     
     list_ai = get_file_list(path)
     list_lh = get_file_list(path_2)
     list_cloud = get_file_list(path_3)
     list_cf = get_file_list(path_4)
     list_modis = get_file_list(path_modis)
+    list_eac4 = get_file_list(path_eac4)
+    
+    
     
     # Extraire les dates des fichiers
     dates1 = extract_dates(list_ai, 47, 55)
@@ -699,10 +753,11 @@ if __name__=="__main__":
     dates3 = extract_dates(list_cloud, 61, 69)
     dates_cf = extract_dates(list_cf, 58, 66)
     date_modis = extract_dates_2(list_modis, 47, 57)
+    date_eac4 = extract_dates_3(list_eac4, 52, 62)
     
-    common_date = find_common_dates(dates1, dates2, dates3, dates_cf, date_modis)
-    comparison_date = datetime(2019, 1, 31)
-    end_date = datetime(2020, 1, 2)
+    common_date = find_common_dates(dates1, dates2, dates3, dates_cf, date_modis, date_eac4)
+    comparison_date = datetime(2019, 12, 31)
+    end_date = datetime(2020, 2, 1)
     filtered_dates = {date for date in common_date if comparison_date < date < end_date}
 
     
@@ -712,8 +767,8 @@ if __name__=="__main__":
     cloud_files = filter_files(list_cloud, filtered_dates, 61, 69)
     cf_files = filter_files(list_cf, filtered_dates, 58, 66)
     modis_files = filter_files_2(list_modis, filtered_dates, 47, 57)
-    
+    eac4_files = filter_files_3(list_eac4, filtered_dates, 52, 62)
     # Créez un pool de processus pour paralléliser
     with Pool(4) as pool:
-        pool.starmap(process_files, zip(ai_files, alh_files, cloud_files, cf_files, modis_files))
+        pool.starmap(process_files, zip(ai_files, alh_files, cloud_files, cf_files, modis_files, eac4_files))
 
